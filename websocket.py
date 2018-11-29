@@ -1,4 +1,4 @@
-import socket, re, hashlib, base64, struct
+import socket, hashlib, base64, struct
 
 
 class Error(Exception):
@@ -13,13 +13,17 @@ class ConnectionClosedError(Error):
     def __init__(self):
         self.message = 'Websocket Connection was closed.'
 
-class ReceiveMessageError(Error):
+class ReceiveOutOfRangeError(Error):
     def __init__(self):
-        self.message = 'Received a wrong message.'
+        self.message = 'Received a message out of range.'
 
 class ClientMessageWithoutMaskError(Error):
     def __init__(self):
         self.message = 'Client message without mask.'
+
+class RequestIsNotForWebsocketError(Error):
+    def __init__(self):
+        self.message = 'Request is not for websocket.'
 
 class WebSocket():
     def __init__(self, host, port=80, bufsize=4096, timeout=0, conn_timeout=0):
@@ -30,17 +34,37 @@ class WebSocket():
         self.client_addr = None
         self.timeout = timeout
         self.conn_timeout = conn_timeout
+        self.onreceive = None
+        self.headers = None
 
     def is_closed(self):
         closed = getattr(self.client, '_closed', False)
         return closed
 
-    def get_server_key(self, rev):
+    def get_server_key(self, client_key):
         magic_string = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
-        r_str = rev.decode('utf-8')
-        client_key = re.search(r'(?<=Sec-WebSocket-Key: ).*(?=\r\n)', r_str).group()
         server_key =  base64.b64encode(hashlib.sha1((client_key + magic_string).encode('utf-8')).digest()).decode('utf-8')
         return server_key
+
+    def parse_header(self, b_rev):
+        headers = {}
+        r_str = b_rev.decode('utf-8')
+        s0 = r_str.split('\r\n')
+        s1 = s0[0].split(' ')
+        headers['Method'] = s1[0]
+        headers['Url'] = s1[1]
+        headers['Protocol'] = s1[2]
+        for kv in s0[1:]:
+            if kv:
+                s2 = kv.split(': ')
+                headers[s2[0]] = s2[1]
+        self.headers = headers
+        return self.headers
+
+    def is_websocket(self):
+        if self.headers['Connection'] == 'Upgrade' and self.headers['Upgrade'] == 'websocket':
+            return True
+        return False
 
     def build_websocket_header_resp(self, key):
         msg = "HTTP/1.1 101 Switching Protocols\r\n" \
@@ -64,14 +88,16 @@ class WebSocket():
 
     def parse_client_msg(self, revmsg):
         global cl
+        total = len(revmsg)
         fin = revmsg[0] >> 7
         opcode = revmsg[0] & 0xF
 
         if opcode == 0x08:
-            self.client.close()
+            self.close()
             return
         has_mask = revmsg[1] >> 7
         if not has_mask:
+            self.client.close()
             raise ClientMessageWithoutMaskError()
         payloadlen = revmsg[1] & 0x7F
         start = 2
@@ -83,8 +109,12 @@ class WebSocket():
         else:
             start = 10
             data_length = struct.unpack('!Q', revmsg[2:10])[0]
+
         mask_end = start + 4
         mask = revmsg[start:mask_end]
+        remain = total - mask_end
+        if data_length > remain:
+            raise ReceiveOutOfRangeError()
         raw_msg = revmsg[mask_end:mask_end + data_length]
         real_msg = bytes([(b ^ mask[i%4]) for i, b in enumerate(raw_msg)])
 
@@ -97,29 +127,32 @@ class WebSocket():
         s.listen(1)
         if self.conn_timeout > 0:
             s.settimeout(self.conn_timeout)
-        try:
-            self.client, self.client_addr = s.accept()
-        except socket.timeout:
-            raise ConnectionFailureError()
-        finally:
-            s.close()
-        if self.timeout > 0:
-            self.client.settimeout(self.timeout)
-        r = self.client.recv(1024)
-        if not r:
-            raise ConnectionFailureError()
-        else:
-            server_key = self.get_server_key(r)
-            msg = self.build_websocket_header_resp(server_key)
-            self.client.sendall(msg)
-            while True:
-                print(self.is_closed())
-                if self.is_closed():
-                    break
-                print(self.receive())
-                import time
-                time.sleep(1)
-                self.send('ok!!')
+        while True:
+            try:
+                self.client, self.client_addr = s.accept()
+            except socket.timeout:
+                s.close()
+                raise ConnectionFailureError()
+            if self.timeout > 0:
+                self.client.settimeout(self.timeout)
+            r = self.client.recv(1024)
+            if not r:
+                self.client.close()
+                continue
+            else:
+                try:
+                    self.parse_header(r)
+                except:
+                    continue
+                if self.is_websocket():
+                    client_key = self.headers.get('Sec-WebSocket-Key', None)
+                    if client_key:
+                        server_key = self.get_server_key(client_key)
+                        msg = self.build_websocket_header_resp(server_key)
+                        self.client.sendall(msg)
+                        s.close()
+                        break
+                self.client.close()
 
     def receive(self):
         if self.is_closed():
@@ -131,6 +164,8 @@ class WebSocket():
             self.close()
             raise e
         else:
+            if self.onreceive and not self.is_closed():
+                self.onreceive(self, msg)
             return msg
 
     def send(self, msg):
@@ -140,13 +175,16 @@ class WebSocket():
         self.client.sendall(b_msg)
 
     def close(self):
-        if self.client:
-            self.client.send(self.build_server_to_client_msg('', opcode=8))
-            self.client.close()
+        if self.client and not self.is_closed():
+            try:
+                self.client.send(self.build_server_to_client_msg('', opcode=8))
+            except:
+                pass
+            finally:
+                self.client.close()
 
-
-ws = WebSocket('127.0.0.1', timeout=10)
+ws = WebSocket('127.0.0.1', port=23333)
+ws.onreceive = lambda ws, msg: ws.send('recv:'+ msg +' and:hahahahahahaha!')
 ws.accept()
-#print(ClientMessageWithoutMaskError())
-# print(parse_msg(b'\x81\x83KK\x92\x8fzy\xa1'))
-# print(parse_msg(b'\x81\x90\xb7mp\xa7\xd1\t\x1a\xcc\x86^BB\x12\xd0\x9567_C\x94'))
+while True:
+    ws.receive()
