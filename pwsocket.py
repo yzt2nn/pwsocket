@@ -1,31 +1,37 @@
+#####################
+# PWSocket
+# Author: yzt
+# License: MIT
+#####################
+
 import socket, hashlib, base64, struct
 
 
-class Error(Exception):
-    def __str__(self):
-        return '[Error]' + self.message
-
-class ConnectionFailureError(Error):
-    def __init__(self):
-        self.message = 'Websocket connection Failure happened.'
-
-class ConnectionClosedError(Error):
-    def __init__(self):
-        self.message = 'Websocket Connection was closed.'
-
-class ReceiveOutOfRangeError(Error):
-    def __init__(self):
-        self.message = 'Received a message out of range.'
-
-class ClientMessageWithoutMaskError(Error):
-    def __init__(self):
-        self.message = 'Client message without mask.'
-
-class RequestIsNotForWebsocketError(Error):
-    def __init__(self):
-        self.message = 'Request is not for websocket.'
-
 class WebSocket():
+    class Error(Exception):
+        def __str__(self):
+            return '[Error]' + self.message
+
+    class ConnectionFailureError(Error):
+        def __init__(self):
+            self.message = 'Websocket connection Failure happened.'
+
+    class ConnectionClosedError(Error):
+        def __init__(self):
+            self.message = 'Websocket Connection was closed.'
+
+    class ReceiveOutOfRangeError(Error):
+        def __init__(self):
+            self.message = 'Received a message out of range.'
+
+    class ClientMessageWithoutMaskError(Error):
+        def __init__(self):
+            self.message = 'Client message without mask.'
+
+    class RequestIsNotForWebsocketError(Error):
+        def __init__(self):
+            self.message = 'Request is not for websocket.'
+
     def __init__(self, host, port=80, bufsize=4096, timeout=0, conn_timeout=0):
         self.host = host
         self.port = port
@@ -62,7 +68,7 @@ class WebSocket():
         return self.headers
 
     def is_websocket(self):
-        if self.headers['Connection'] == 'Upgrade' and self.headers['Upgrade'] == 'websocket':
+        if 'Upgrade' in self.headers['Connection'] and self.headers['Upgrade'] == 'websocket':
             return True
         return False
 
@@ -98,7 +104,7 @@ class WebSocket():
         has_mask = revmsg[1] >> 7
         if not has_mask:
             self.client.close()
-            raise ClientMessageWithoutMaskError()
+            raise WebSocket.ClientMessageWithoutMaskError()
         payloadlen = revmsg[1] & 0x7F
         start = 2
         if payloadlen < 126:
@@ -114,7 +120,7 @@ class WebSocket():
         mask = revmsg[start:mask_end]
         remain = total - mask_end
         if data_length > remain:
-            raise ReceiveOutOfRangeError()
+            raise WebSocket.ReceiveOutOfRangeError()
         raw_msg = revmsg[mask_end:mask_end + data_length]
         real_msg = bytes([(b ^ mask[i%4]) for i, b in enumerate(raw_msg)])
 
@@ -132,7 +138,7 @@ class WebSocket():
                 self.client, self.client_addr = s.accept()
             except socket.timeout:
                 s.close()
-                raise ConnectionFailureError()
+                raise WebSocket.ConnectionFailureError()
             if self.timeout > 0:
                 self.client.settimeout(self.timeout)
             r = self.client.recv(1024)
@@ -156,11 +162,11 @@ class WebSocket():
 
     def receive(self):
         if self.is_closed():
-            raise ConnectionClosedError()
+            raise WebSocket.ConnectionClosedError()
         b_msg = self.client.recv(self.bufsize)
         try:
             msg = self.parse_client_msg(b_msg)
-        except ClientMessageWithoutMaskError as e:
+        except WebSocket.ClientMessageWithoutMaskError as e:
             self.close()
             raise e
         else:
@@ -170,7 +176,7 @@ class WebSocket():
 
     def send(self, msg):
         if self.is_closed():
-            raise ConnectionClosedError()
+            raise WebSocket.ConnectionClosedError()
         b_msg = self.build_server_to_client_msg(msg)
         self.client.sendall(b_msg)
 
@@ -182,9 +188,3 @@ class WebSocket():
                 pass
             finally:
                 self.client.close()
-
-ws = WebSocket('127.0.0.1', port=23333)
-ws.onreceive = lambda ws, msg: ws.send('recv:'+ msg +' and:hahahahahahaha!')
-ws.accept()
-while True:
-    ws.receive()
